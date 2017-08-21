@@ -8,6 +8,7 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "spline.h"
 
 using namespace std;
 
@@ -159,6 +160,20 @@ vector<double> getXY(double s, double d, vector<double> maps_s, vector<double> m
 
 }
 
+int lane = 1; //0-left lane, 1-middle lane, 2-right lane
+double ref_velocity = 0.0; //MPH
+
+typedef struct _SensorFusion {
+  double id;
+  double x;
+  double y;
+  double vx;
+  double vy;
+  double s;
+  double d;
+
+}SensorFusion;
+
 int main() {
   uWS::Hub h;
 
@@ -235,17 +250,468 @@ int main() {
 
           	json msgJson;
 
-          	vector<double> next_x_vals;
+            int prev_path_size  = previous_path_x.size();
+
+
+            if(prev_path_size > 0)
+            {
+              car_s = end_path_s;
+            }
+
+            bool decelerate  = false;
+            bool lane_change = false;
+            double max_velocity = 49.5;
+
+            vector<SensorFusion> cars_left_ahead;
+            vector<SensorFusion> cars_center_ahead;
+            vector<SensorFusion> cars_right_ahead;
+
+            vector<SensorFusion> cars_left_behind;
+            vector<SensorFusion> cars_center_behind;
+            vector<SensorFusion> cars_right_behind;
+
+            for(int i = 0; i < sensor_fusion.size(); i++)
+            {
+              SensorFusion car;
+
+              double id = sensor_fusion[i][0];
+              double  x = sensor_fusion[i][1];
+              double  y = sensor_fusion[i][2];
+              double vx = sensor_fusion[i][3];
+              double vy = sensor_fusion[i][4];
+              double  s = sensor_fusion[i][5];
+              double  d = sensor_fusion[i][6];
+
+              double obj_speed = sqrt(vx*vx + vy*vy);
+              double sensor_range = 400.0;
+
+              car.id = id;
+              car.x = x;
+              car.y = y;
+              car.vx = vx;
+              car.vy = vy;
+              car.s = s;
+              car.d = d;
+
+              if (((s - car_s) >= 0.0) && ((s - car_s) < sensor_range))
+              {
+                if (d < 4.0)
+                {
+                  cars_left_ahead.push_back(car);
+                }
+                else if ((d > 4.0) && (d < 8.0))
+                {
+                  cars_center_ahead.push_back(car);
+                }
+                else if(d > 8.0)
+                {
+                  cars_right_ahead.push_back(car);
+                }
+              }
+              else if (((s - car_s) < 0.0) && ((s - car_s) > -sensor_range))
+              {
+                if (d < 4.0)
+                {
+                  cars_left_behind.push_back(car);
+                }
+                else if ((d > 4.0) && (d < 8.0))
+                {
+                  cars_center_behind.push_back(car);
+                }
+                else if(d > 8.0)
+                {
+                  cars_right_behind.push_back(car);
+                }
+              }
+
+              if((d < (2+4*lane+2)) && (d > (2+4*lane-2)))
+              {
+                double vx = sensor_fusion[i][3];
+                double vy = sensor_fusion[i][4];
+                double obj_speed = sqrt(vx*vx + vy*vy);
+                double obj_distance = sensor_fusion[i][5];
+
+                double obj_distance_future = obj_distance + (0.02 * obj_speed * prev_path_size);
+
+                if((obj_distance_future > car_s) && ((obj_distance_future - car_s) < 30.0))
+                {
+                  lane_change = true;
+                  max_velocity = obj_speed;
+                }
+              }
+            }
+
+            printf("lane  - %d ", lane);
+            printf("speed - %f ", ref_velocity);
+            printf("Ahead - ");
+            printf("|%3d|%3d|%3d| ", cars_left_ahead.size(), cars_center_ahead.size(), cars_right_ahead.size());
+            printf("Behind - ");
+            printf("|%3d|%3d|%3d| ", cars_left_behind.size(), cars_center_behind.size(), cars_right_behind.size());
+            printf("Max vel - %5.2f", max_velocity);
+            printf("\n");
+
+            if(ref_velocity < max_velocity)
+            {
+              ref_velocity += (0.224 * 2);
+            }
+            else
+            {
+              ref_velocity -= (0.224 * 2);
+            }
+
+            if(lane_change == true) {
+
+              int new_lane;
+              double min_dist_ahead;
+              double max_dist_behind;
+              int car_behind;
+              int car_ahead;
+              double safe_dist = 20.0;
+
+              printf("Try Lane Change!\n");
+              printf("safe_dist = %f\n", safe_dist);
+
+              //Check if adjacent lane is empty
+              if(lane != 1)
+              {
+                min_dist_ahead = 10000;
+                max_dist_behind = 10000;
+                car_behind = -1;
+                car_ahead = -1;
+
+                new_lane = 1;
+                for(int j = 0; j < cars_center_ahead.size(); j++)
+                {
+                  SensorFusion *car = (SensorFusion *)&cars_center_ahead[j];
+                  int d = car->d;
+
+                  if((d < (2+4*new_lane+2)) && (d > (2+4*new_lane-2)))
+                  {
+                    double obj_dst = car->s;
+
+                    printf("Car ahead in center at distance = %f\n", (obj_dst - car_s));
+                    if((obj_dst - car_s) < min_dist_ahead)
+                    {
+                      min_dist_ahead = (obj_dst - car_s);
+                      car_ahead = car->id;
+                    }
+                  }
+                }
+
+                for(int j = 0; j < cars_center_behind.size(); j++)
+                {
+                  SensorFusion *car = (SensorFusion *)&cars_center_behind[j];
+                  int d = car->d;
+
+                  if((d < (2+4*new_lane+2)) && (d > (2+4*new_lane-2)))
+                  {
+                    double obj_dst = car->s;
+
+                    printf("Car behind in center at distance = %f\n", (car_s - obj_dst));
+                    if((car_s - obj_dst) < max_dist_behind)
+                    {
+                      max_dist_behind = (car_s - obj_dst);
+                      car_behind = car->id;
+                    }
+                  }
+                }
+
+                if((car_ahead == -1) && (car_behind == -1)) {
+                  lane = 1;
+                }
+
+                if((car_ahead == -1) && (car_behind >=0)) {
+                  if(max_dist_behind > safe_dist) {
+                    lane = new_lane;
+                    printf("No cars ahead! max_dist_behind = %f  ", max_dist_behind);
+                  }
+                }
+
+                if((car_behind == -1) && (car_ahead >=0)) {
+                  if(min_dist_ahead > safe_dist) {
+                    lane = new_lane;
+                    printf("No cars behind! min_dist_ahead = %f  ", min_dist_ahead);
+                  }
+                }
+
+                if((car_behind >= 0) && (car_ahead >=0)) {
+                  if((min_dist_ahead > safe_dist) && (max_dist_behind > safe_dist)) {
+                    lane = new_lane;
+                    printf("Gap found! min_dist_ahead = %f, max_dist_behind = %f, safe_dist = %f \n", min_dist_ahead, max_dist_behind, safe_dist);
+                  }
+                }
+
+              }
+              else
+              {
+                bool left_lane_free = false;
+                bool right_lane_free = false;
+
+                min_dist_ahead = 10000;
+                max_dist_behind = 10000;
+                car_behind = -1;
+                car_ahead = -1;
+
+                new_lane = 0;
+                for(int j = 0; j < cars_left_ahead.size(); j++)
+                {
+                  SensorFusion *car = (SensorFusion *)&cars_left_ahead[j];
+                  int d = car->d;
+
+                  if((d < (2+4*new_lane+2)) && (d > (2+4*new_lane-2)))
+                  {
+                    double obj_dst = car->s;
+
+                    printf("Car ahead in left lane at distance = %f\n", (obj_dst - car_s));
+                    if((obj_dst - car_s) < min_dist_ahead)
+                    {
+                      min_dist_ahead = (obj_dst - car_s);
+                      car_ahead = car->id;
+                    }
+                  }
+                }
+
+                for(int j = 0; j < cars_left_behind.size(); j++)
+                {
+                  SensorFusion *car = (SensorFusion *)&cars_left_behind[j];
+                  int d = car->d;
+                  if((d < (2+4*new_lane+2)) && (d > (2+4*new_lane-2)))
+                  {
+                    double obj_dst = car->s;
+
+                    printf("Car behind in left lane at distance = %f\n", (car_s - obj_dst));
+                    if((car_s - obj_dst) < max_dist_behind)
+                    {
+                      max_dist_behind = (car_s - obj_dst);
+                      car_behind = car->id;
+                    }
+                  }
+                }
+
+                if((car_ahead == -1) && (car_behind == -1)) {
+                  left_lane_free = true;
+                }
+
+                if((car_ahead == -1) && (car_behind >=0)) {
+                  if(max_dist_behind > safe_dist) {
+                    left_lane_free = 1;
+                    printf("No cars ahead! max_dist_behind = %f  \n", max_dist_behind);
+                  }
+                }
+
+                if((car_behind == -1) && (car_ahead >=0)) {
+                  if(min_dist_ahead > safe_dist) {
+                    left_lane_free = 1;
+                    printf("No cars behind! min_dist_ahead = %f  \n", min_dist_ahead);
+                  }
+                }
+
+                if((car_behind >= 0) && (car_ahead >=0)) {
+                  if((min_dist_ahead > safe_dist) && (max_dist_behind > safe_dist)) {
+                    left_lane_free = 1;
+                    printf("Gap found! min_dist_ahead = %f, max_dist_behind = %f, safe_dist = %f \n", min_dist_ahead, max_dist_behind, safe_dist);
+                  }
+                }
+
+                min_dist_ahead = 10000;
+                max_dist_behind = 10000;
+                car_behind = -1;
+                car_ahead = -1;
+
+                new_lane = 2;
+                for(int j = 0; j < cars_right_ahead.size(); j++)
+                {
+                  SensorFusion *car = (SensorFusion *)&cars_right_ahead[j];
+                  int d = car->d;
+                  if((d < (2+4*new_lane+2)) && (d > (2+4*new_lane-2)))
+                  {
+                    double obj_dst = car->s;
+
+                    printf("Car ahead in right lane at distance = %f\n", (obj_dst - car_s));
+                    if((obj_dst - car_s) < min_dist_ahead)
+                    {
+                      min_dist_ahead = (obj_dst - car_s);
+                      car_ahead = car->id;
+                    }
+                  }
+                }
+
+                for(int j = 0; j < cars_right_behind.size(); j++)
+                {
+                  SensorFusion *car = (SensorFusion *)&cars_right_behind[j];
+                  int d = car->d;
+                  if((d < (2+4*new_lane+2)) && (d > (2+4*new_lane-2)))
+                  {
+                    double obj_dst = car->s;
+
+                    printf("Car behind in right lane at distance = %f\n", (car_s - obj_dst));
+                    if((car_s - obj_dst) < max_dist_behind)
+                    {
+                      max_dist_behind = (car_s - obj_dst);
+                      car_behind = car->id;
+                    }
+                  }
+                }
+
+                if((car_ahead == -1) && (car_behind == -1)) {
+                  right_lane_free = true;
+                }
+
+                if((car_ahead == -1) && (car_behind >=0)) {
+                  if(max_dist_behind > safe_dist) {
+                    right_lane_free = 1;
+                    printf("No cars ahead! max_dist_behind = %f  \n", max_dist_behind);
+                  }
+                }
+
+                if((car_behind == -1) && (car_ahead >=0)) {
+                  if(min_dist_ahead > safe_dist) {
+                    right_lane_free = 1;
+                    printf("No cars behind! min_dist_ahead = %f  \n", min_dist_ahead);
+                  }
+                }
+
+                if((car_behind >= 0) && (car_ahead >=0)) {
+                  if((min_dist_ahead > safe_dist) && (max_dist_behind > safe_dist)) {
+                    right_lane_free = 1;
+                    printf("Gap found! min_dist_ahead = %f, max_dist_behind = %f, safe_dist = %f \n", min_dist_ahead, max_dist_behind, safe_dist);
+                  }
+                }
+
+                printf("left_lane_free = %d, right_lane_free = %d\n", left_lane_free, right_lane_free);
+                if(left_lane_free && right_lane_free)
+                {
+                  printf("Cars Left = %d, Right = %d\n", cars_left_ahead.size(), cars_right_ahead.size());
+                  if(cars_left_ahead.size() > cars_right_ahead.size())
+                  {
+                    lane = 2;
+                  }
+                  else
+                  {
+                    lane = 0;
+                  }
+                }
+
+                if(left_lane_free && !right_lane_free)
+                {
+                  lane = 0;
+                }
+
+                if(!left_lane_free && right_lane_free)
+                {
+                  lane = 2;
+                }
+
+                if(!left_lane_free && !right_lane_free)
+                {
+                  if((cars_left_ahead.size()  == 0) &&
+                     (cars_right_ahead.size() == 0) &&
+                     (cars_left_behind.size() == 0) &&
+                     (cars_right_behind.size() == 0))
+                  {
+                    lane = 0;
+                  }
+                }
+              }
+
+              printf("Choosen lane %d\n", lane);
+            }
+
+            vector<double> pts_x;
+            vector<double> pts_y;
+
+            double ref_x = car_x;
+            double ref_y = car_y;
+            double ref_yaw = deg2rad(car_yaw);
+
+            if(prev_path_size < 2)
+            {
+              pts_x.push_back(car_x - cos(car_yaw));
+              pts_y.push_back(car_y - sin(car_yaw));
+
+              pts_x.push_back(car_x);
+              pts_y.push_back(car_y);
+            }
+            else
+            {
+              ref_x = previous_path_x[prev_path_size - 1];
+              ref_y = previous_path_y[prev_path_size - 1];
+
+              double ref_x_prev = previous_path_x[prev_path_size - 2];
+              double ref_y_prev = previous_path_y[prev_path_size - 2];
+              ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
+
+              pts_x.push_back(ref_x_prev);
+              pts_y.push_back(ref_y_prev);
+
+              pts_x.push_back(ref_x);
+              pts_y.push_back(ref_y);
+            }
+
+            vector<double> next_wp0 = getXY(car_s + 30, (2 + 4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            vector<double> next_wp1 = getXY(car_s + 60, (2 + 4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            vector<double> next_wp2 = getXY(car_s + 90, (2 + 4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+
+            pts_x.push_back(next_wp0[0]);
+            pts_y.push_back(next_wp0[1]);
+
+            pts_x.push_back(next_wp1[0]);
+            pts_y.push_back(next_wp1[1]);
+
+            pts_x.push_back(next_wp2[0]);
+            pts_y.push_back(next_wp2[1]);
+
+            for(int i = 0; i < pts_x.size(); i++)
+            {
+              double new_x = pts_x[i] - ref_x;
+              double new_y = pts_y[i] - ref_y;
+
+              pts_x[i] = (new_x * cos(0-ref_yaw)) - (new_y * sin(0-ref_yaw));
+              pts_y[i] = (new_x * sin(0-ref_yaw)) + (new_y * cos(0-ref_yaw));
+
+            }
+
+            tk::spline s;
+
+            s.set_points(pts_x, pts_y);
+
+            vector<double> next_x_vals;
           	vector<double> next_y_vals;
 
+          	for(int i = 0; i < prev_path_size; i++)
+          	{
+          	  next_x_vals.push_back(previous_path_x[i]);
+          	  next_y_vals.push_back(previous_path_y[i]);
+          	}
 
-          	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
+          	double target_x = 30.0;
+          	double target_y = s(target_x);
+
+          	double target_dist = sqrt((target_x * target_x) + (target_y * target_y));
+            double N = target_dist/(0.02 * ref_velocity / 2.24);
+            double delta_x = target_x / N;
+
+            double new_x = 0.0;
+            double new_y = 0.0;
+
+            for(int i = 0; i < (50 - prev_path_size); i++)
+            {
+              new_x = new_x + delta_x;
+              new_y = s(new_x);
+
+              double out_x = ref_x + (new_x * cos(ref_yaw)) - (new_y * sin(ref_yaw));
+              double out_y = ref_y + (new_x * sin(ref_yaw)) + (new_y * cos(ref_yaw));
+
+              next_x_vals.push_back(out_x);
+              next_y_vals.push_back(out_y);
+            }
+
           	msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 
           	auto msg = "42[\"control\","+ msgJson.dump()+"]";
 
-          	//this_thread::sleep_for(chrono::milliseconds(1000));
+          	//this_thread::sleep_for(chrono::milliseconxds(1000));
           	ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
           
         }
